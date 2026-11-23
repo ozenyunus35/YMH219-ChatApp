@@ -32,8 +32,58 @@ public partial class SohbetFormu : Form
         yaziyorZamanlayici.Interval = 1000;
         txtMesaj.GotFocus += (_, _) => pnlGiris.Invalidate();
         txtMesaj.LostFocus += (_, _) => pnlGiris.Invalidate();
-        ipucu.SetToolTip(lstKullanicilar, "Bir kullanıcıya çift tıklayarak özel mesaj gönderebilirsiniz");
+        ipucu.SetToolTip(lstKullanicilar, "Bir kullanıcıya çift tıklayarak (veya seçip Enter) özel mesaj gönderebilirsiniz");
         ipucu.SetToolTip(btnGecmisKaydet, "Ekrandaki mesajları .txt dosyasına kaydet");
+        ipucu.SetToolTip(btnGonder, "Gönder (Enter)");
+        ipucu.SetToolTip(btnOzelIptal, "Genel sohbete dön (Esc)");
+        ipucu.SetToolTip(txtKullanici, "2-20 karakter: harf, rakam, _ - .");
+        ipucu.SetToolTip(btnBaglan, "Sunucuya bağlan (Enter)");
+
+        // Sunucu ve port kutularında da Enter bağlansın
+        txtSunucu.KeyDown += txtKullanici_KeyDown;
+        txtPort.KeyDown += txtKullanici_KeyDown;
+
+        // Çift tıklama boş alana denk gelirse özel mod açılmasın; klavye ve sağ tık da çalışsın
+        lstKullanicilar.DoubleClick -= lstKullanicilar_DoubleClick;
+        lstKullanicilar.MouseDoubleClick += (_, e) =>
+        {
+            int i = lstKullanicilar.IndexFromPoint(e.Location);
+            if (i >= 0 && lstKullanicilar.Items[i] is string ad) OzelModuDene(ad);
+        };
+        lstKullanicilar.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Enter && lstKullanicilar.SelectedItem is string ad)
+            {
+                e.SuppressKeyPress = true;
+                OzelModuDene(ad);
+            }
+        };
+        var kisiMenu = new ContextMenuStrip();
+        var ozelMenu = new ToolStripMenuItem("Özel mesaj gönder");
+        ozelMenu.Click += (_, _) => { if (lstKullanicilar.SelectedItem is string ad) OzelModuDene(ad); };
+        kisiMenu.Items.Add(ozelMenu);
+        kisiMenu.Opening += (_, e) =>
+        {
+            var p = lstKullanicilar.PointToClient(Cursor.Position);
+            int i = lstKullanicilar.IndexFromPoint(p);
+            if (i >= 0) lstKullanicilar.SelectedIndex = i;
+            e.Cancel = !(lstKullanicilar.SelectedItem is string ad && ad != istemci.UserName && istemci.State == ConnectionState.Connected);
+        };
+        lstKullanicilar.ContextMenuStrip = kisiMenu;
+
+        // Özel mod çipi ad uzunluğuna göre büyüsün (uzun adda ✕ kesiliyordu)
+        btnOzelIptal.AutoSize = true;
+        btnOzelIptal.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        btnOzelIptal.Padding = new Padding(6, 0, 6, 0);
+
+        // Bağlı değilken mesaj kutusu gri değil, salt okunur (koyu/açık temada gri blok görünmesin)
+        txtMesaj.BackColor = Color.White;
+        // Odak mesaj kutusundayken fare tekerleği sohbet geçmişini kaydırsın
+        txtMesaj.MouseWheel += (_, e) => mesajListesi.Kaydir(e.Delta);
+
+        lblUyari.AutoEllipsis = true;
+        uyariZamanlayici.Tick += (_, _) => { uyariZamanlayici.Stop(); UyariGizle(); };
+        pnlGiris.Resize += (_, _) => GirisDuzeniniAyarla();
 
         ArayuzuGuncelle();
     }
@@ -44,6 +94,15 @@ public partial class SohbetFormu : Form
         if (args.Length > 0) txtKullanici.Text = args[0];
         if (args.Length > 1) txtSunucu.Text = args[1];
         if (args.Length > 2) txtPort.Text = args[2];
+    }
+
+    private readonly System.Windows.Forms.Timer uyariZamanlayici = new() { Interval = 5000 };
+    private bool gonderiyor;
+
+    private void OzelModuDene(string ad)
+    {
+        if (ad != istemci.UserName && istemci.State == ConnectionState.Connected)
+            OzelModuAc(ad);
     }
 
     private void SohbetFormu_Shown(object? sender, EventArgs e)
@@ -94,7 +153,6 @@ public partial class SohbetFormu : Form
             mesajListesi.BenimAdim = istemci.UserName;
             lstKullanicilar.BenimAdim = istemci.UserName;
             EkranaEkle(Packet.SystemNotice($"{istemci.ServerAddress} sunucusuna \"{istemci.UserName}\" olarak bağlandınız."));
-            txtMesaj.Focus();
         }
         catch (ChatException ex)
         {
@@ -105,6 +163,10 @@ public partial class SohbetFormu : Form
         {
             ArayuzuGuncelle();
         }
+
+        // Odak, arayüz güncellendikten sonra veriliyor (önce verilince kutu henüz salt okunurdu)
+        if (istemci.State == ConnectionState.Connected)
+            txtMesaj.Focus();
     }
 
     private async void btnKes_Click(object? sender, EventArgs e)
@@ -113,6 +175,7 @@ public partial class SohbetFormu : Form
         EkranaEkle(Packet.SystemNotice("Bağlantıyı kestiniz."));
         OzelModuKapat();
         ArayuzuGuncelle();
+        txtKullanici.Focus();
     }
 
     private void Istemci_BaglantiKoptu(object? sender, string sebep)
@@ -121,6 +184,7 @@ public partial class SohbetFormu : Form
         Bildir(sebep + "  Tekrar bağlanmak için \"Bağlan\" butonunu kullanın.", hata: true);
         OzelModuKapat();
         ArayuzuGuncelle();
+        txtKullanici.Focus();
     }
 
     // ===================== Mesajlar =====================
@@ -170,10 +234,14 @@ public partial class SohbetFormu : Form
 
     internal async Task GonderAsync()
     {
+        // Enter basılı tutulunca / Gönder'e çift tıklanınca aynı mesaj iki kez gitmesin
+        if (gonderiyor)
+            return;
         string yazi = txtMesaj.Text.Trim();
         if (yazi.Length == 0 || istemci.State != ConnectionState.Connected)
             return;
 
+        gonderiyor = true;
         try
         {
             if (ChatRules.TryParseWhisper(yazi, out string alici, out string ozelMetin))
@@ -190,6 +258,10 @@ public partial class SohbetFormu : Form
         {
             Bildir(ex.Message, hata: true);
         }
+        finally
+        {
+            gonderiyor = false;
+        }
 
         txtMesaj.Focus();
     }
@@ -198,6 +270,9 @@ public partial class SohbetFormu : Form
     {
         // "yazıyor..." bilgisini en fazla 2 saniyede bir gönder
         if (istemci.State != ConnectionState.Connected || txtMesaj.TextLength == 0)
+            return;
+        // Özel mesaj yazarken herkese "yazıyor..." gitmesin
+        if (ozelAlici != null || txtMesaj.Text.StartsWith("/w", StringComparison.OrdinalIgnoreCase))
             return;
         if (DateTime.Now - sonYaziyorBildirimi < TimeSpan.FromSeconds(2))
             return;
@@ -244,6 +319,7 @@ public partial class SohbetFormu : Form
         ozelAlici = ad;
         btnOzelIptal.Text = $"Özel: {ad}  ✕";
         btnOzelIptal.Visible = true;
+        btnGonder.Text = "Özel gönder";
         txtMesaj.PlaceholderText = $"{ad} kullanıcısına özel mesaj...  (Esc: iptal)";
         GirisDuzeniniAyarla();
         txtMesaj.Focus();
@@ -255,12 +331,18 @@ public partial class SohbetFormu : Form
     {
         ozelAlici = null;
         btnOzelIptal.Visible = false;
+        btnGonder.Text = "Gönder";
         txtMesaj.PlaceholderText = "Mesaj yazın...  (/w kullanıcı mesaj = özel mesaj)";
         GirisDuzeniniAyarla();
     }
 
     private void GirisDuzeniniAyarla()
     {
+        if (btnOzelIptal.Visible)
+        {
+            btnOzelIptal.PerformLayout();
+            btnOzelIptal.Left = btnGonder.Left - btnOzelIptal.Width - 8;
+        }
         int sag = btnOzelIptal.Visible ? btnOzelIptal.Left : btnGonder.Left;
         txtMesaj.Width = Math.Max(80, sag - txtMesaj.Left - 10);
     }
@@ -297,7 +379,16 @@ public partial class SohbetFormu : Form
         btnBaglan.Enabled = kapali;
         btnBaglan.Text = durum == ConnectionState.Connecting ? "Bağlanıyor..." : "Bağlan";
         btnKes.Enabled = bagli;
-        txtMesaj.Enabled = btnGonder.Enabled = bagli;
+        txtMesaj.ReadOnly = !bagli;
+        txtMesaj.TabStop = bagli;
+        btnGonder.Enabled = bagli;
+        if (!bagli)
+        {
+            txtMesaj.Clear();
+            txtMesaj.PlaceholderText = "Bağlanınca mesaj yazabilirsiniz";
+        }
+        else if (ozelAlici is null && txtMesaj.PlaceholderText.StartsWith("Bağlanınca"))
+            txtMesaj.PlaceholderText = "Mesaj yazın...  (/w kullanıcı mesaj = özel mesaj)";
 
         durumRozeti.Durum = bagli ? Durum.Acik : kapali ? Durum.Kapali : Durum.Bekliyor;
         durumRozeti.Text = bagli ? "Bağlı" : kapali ? "Bağlı değil" : "Bağlanıyor...";
@@ -317,9 +408,14 @@ public partial class SohbetFormu : Form
     private void Bildir(string mesaj, bool hata)
     {
         lblUyari.Text = (hata ? "⚠  " : "✓  ") + mesaj;
+        ipucu.SetToolTip(lblUyari, mesaj);      // uzun mesaj kesilirse tamamı ipucunda
         pnlUyari.BackColor = hata ? Color.FromArgb(253, 232, 235) : Color.FromArgb(225, 245, 234);
         lblUyari.ForeColor = hata ? Color.FromArgb(160, 30, 50) : Color.FromArgb(20, 110, 60);
         pnlUyari.Visible = true;
+        // Başarı mesajları birkaç saniye sonra kendiliğinden kapanıyor
+        uyariZamanlayici.Stop();
+        if (!hata)
+            uyariZamanlayici.Start();
     }
 
     private void UyariGizle() => pnlUyari.Visible = false;
@@ -384,6 +480,7 @@ public partial class SohbetFormu : Form
 
     private void SohbetFormu_FormClosing(object? sender, FormClosingEventArgs e)
     {
+        uyariZamanlayici.Dispose();
         istemci.Dispose();      // soket kapanınca sunucu ayrıldığımızı anlıyor
     }
 }

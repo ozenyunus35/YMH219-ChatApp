@@ -46,6 +46,19 @@ Bir **sunucu** ve istediğiniz kadar **istemci** aynı bilgisayarda ya da aynı 
 - Sunucu, özel mesajların **içeriğini göstermiyor**; sadece kimden kime gittiğini yazıyor
 - Mesaj balonları: kendi mesajlarınız sağda, özel mesajlar mor, sunucu duyuruları sarı
 
+### Kullanım ipuçları
+
+| Nerede | Ne yapar |
+|---|---|
+| Sunucu / port / kullanıcı adı kutusunda `Enter` | Bağlanır |
+| Mesaj kutusunda `Enter` | Gönderir (aynı mesaj iki kez gitmez) |
+| Kullanıcı listesinde çift tık, `Enter` veya sağ tık → *Özel mesaj gönder* | Özel moda geçer; `Esc` veya çipteki ✕ genel sohbete döner |
+| Mesaj balonuna sağ tık | Mesajı ya da tüm sohbeti panoya kopyalar |
+| Sunucuda tabloda `Delete` | Seçili kullanıcıyı (onay sorarak) çıkarır |
+| Sunucuda port kutusunda `Enter` | Sunucuyu başlatır |
+
+Bağlı kullanıcı varken sunucuyu durdurmak veya pencereyi kapatmak önce onay ister.
+
 ## Ekran görüntüleri
 
 | İstemci (ali) | Sunucu |

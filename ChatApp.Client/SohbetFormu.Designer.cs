@@ -354,7 +354,7 @@ partial class SohbetFormu
         //
         txtMesaj.Anchor = AnchorStyles.Left | AnchorStyles.Right;
         txtMesaj.BorderStyle = BorderStyle.None;
-        txtMesaj.Enabled = false;
+        txtMesaj.ReadOnly = true;
         txtMesaj.Font = new Font("Segoe UI", 10.5F);
         txtMesaj.Location = new Point(14, 12);
         txtMesaj.MaxLength = 1000;
