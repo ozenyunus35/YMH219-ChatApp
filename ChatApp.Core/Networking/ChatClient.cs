@@ -23,7 +23,9 @@ public sealed class ChatClient : IDisposable
 {
     private readonly EventRaiser events = new();
     private TcpClient? tcp;
-    private StreamReader? reader;
+    private LineReader? reader;
+    // Sunucudan gelen tek satır (ör. kalabalık kullanıcı listesi) için üst sınır
+    private const int MaxLineLength = 1_000_000;
     private StreamWriter? writer;
     private readonly SemaphoreSlim writeLock = new(1, 1);
     private CancellationTokenSource? cts;
@@ -56,6 +58,9 @@ public sealed class ChatClient : IDisposable
         if (string.IsNullOrWhiteSpace(host))
             throw new ChatException("Sunucu adresi boş olamaz.");
 
+        if (port is < 1 or > 65535)
+            throw new ChatException("Port 1 ile 65535 arasında olmalı.");
+
         SetState(ConnectionState.Connecting);
         userRequestedDisconnect = false;
         tcp = new TcpClient();
@@ -83,7 +88,7 @@ public sealed class ChatClient : IDisposable
                 }
 
                 NetworkStream stream = tcp.GetStream();
-                reader = new StreamReader(stream);
+                reader = new LineReader(stream, MaxLineLength);
                 writer = new StreamWriter(stream) { AutoFlush = true };
 
                 await writer.WriteLineAsync(Packet.Hello(userName.Trim()).ToJson());
@@ -109,8 +114,9 @@ public sealed class ChatClient : IDisposable
                     throw new ChatException("Beklenmeyen sunucu cevabı.");
             }
         }
-        catch (Exception ex) when (ex is ChatException or IOException or SocketException)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // Hangi hata olursa olsun durum "Bağlanıyor"da takılı kalmasın
             CloseSocket();
             SetState(ConnectionState.Disconnected);
             if (ex is ChatException)
@@ -214,7 +220,11 @@ public sealed class ChatClient : IDisposable
                 events.Raise(() => PacketReceived?.Invoke(this, packet));
             }
         }
-        catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException or OperationCanceledException)
+        catch (InvalidDataException)
+        {
+            reason = "Sunucudan anlaşılamayan (çok uzun) veri geldi, bağlantı kesildi.";
+        }
+        catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException or OperationCanceledException or NullReferenceException)
         {
             reason = "Sunucu ile bağlantı koptu.";
         }

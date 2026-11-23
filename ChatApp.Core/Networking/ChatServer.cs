@@ -105,12 +105,15 @@ public sealed class ChatServer : IDisposable
     /// <summary>Kullanıcıyı sunucudan çıkarır.</summary>
     public bool Kick(string userName)
     {
-        var target = clients.Values.FirstOrDefault(c => string.Equals(c.UserName, userName, StringComparison.OrdinalIgnoreCase));
+        if (string.IsNullOrWhiteSpace(userName))
+            return false;
+        var target = clients.Values.FirstOrDefault(c => c.UserName != null &&
+                                                        string.Equals(c.UserName, userName, StringComparison.OrdinalIgnoreCase));
         if (target is null)
             return false;
 
         target.TrySend(Packet.Fail("Sunucu tarafından bağlantınız kesildi."));
-        target.Close();
+        target.Close();     // kuyruktaki hata mesajı gönderildikten sonra kapanıyor
         return true;
     }
 
@@ -165,6 +168,11 @@ public sealed class ChatServer : IDisposable
                 HandlePacket(connection, packet);
             }
         }
+        catch (InvalidDataException)
+        {
+            // satır sonu göndermeden dev veri yollayan bağlantı: belleği doldurmasın diye kesiliyor
+            connection.TrySend(Packet.Fail("Mesaj çok uzun, bağlantı kesildi."));
+        }
         catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException or OperationCanceledException)
         {
             // istemci aniden koptu; aşağıda temizleniyor
@@ -190,6 +198,11 @@ public sealed class ChatServer : IDisposable
             connection.TrySend(Packet.Fail("Zaman aşımı: kullanıcı adı gönderilmedi."));
             return false;
         }
+        catch (InvalidDataException)
+        {
+            connection.TrySend(Packet.Fail("İlk paket çok uzun."));
+            return false;
+        }
 
         if (!Packet.TryParse(line, out Packet? hello) || hello!.Type != PacketType.Hello)
         {
@@ -211,10 +224,12 @@ public sealed class ChatServer : IDisposable
                 connection.TrySend(Packet.Fail($"\"{name}\" kullanıcı adı şu anda kullanımda."));
                 return false;
             }
+            // Önce Welcome kuyruğa giriyor, sonra ad görünür oluyor: aynı anda yapılan bir yayın
+            // (mesaj, kullanıcı listesi) Welcome'dan önce gidip istemcinin bağlanmasını bozmasın
+            connection.TrySend(Packet.Welcome(name));
             connection.UserName = name;
         }
 
-        connection.TrySend(Packet.Welcome(name));
         Broadcast(Packet.SystemNotice($"{name} sohbete katıldı."), except: connection);
         Broadcast(Packet.UserList(OnlineUsers));
 
@@ -255,7 +270,14 @@ public sealed class ChatServer : IDisposable
                     return;
                 }
 
-                var target = clients.Values.FirstOrDefault(c => string.Equals(c.UserName, packet.To, StringComparison.OrdinalIgnoreCase));
+                if (string.IsNullOrWhiteSpace(packet.To))
+                {
+                    sender.TrySend(Packet.Fail("Özel mesajın alıcısı boş."));
+                    return;
+                }
+                // Henüz adını göndermemiş bağlantılar (UserName null) alıcı olamaz
+                var target = clients.Values.FirstOrDefault(c => c.UserName != null &&
+                                                                string.Equals(c.UserName, packet.To, StringComparison.OrdinalIgnoreCase));
                 if (target is null)
                 {
                     sender.TrySend(Packet.Fail($"\"{packet.To}\" adında çevrimiçi kullanıcı yok."));
@@ -326,19 +348,46 @@ public sealed class ChatServer : IDisposable
     /// <summary>Sunucunun tek bir istemciyle olan bağlantısı.</summary>
     private sealed class ClientConnection
     {
+        // JSON'da Türkçe karakterler \uXXXX olarak 6 katına çıkabiliyor
+        private const int MaxLineLength = ChatRules.MaxMessageLength * 6 + 512;
+        private const int MaxQueuedPackets = 2048;   // yoğun sohbette normal istemci atılmasın, takılan istemci yine de sınırlı
+
         private readonly TcpClient tcp;
-        private readonly StreamReader reader;
+        private readonly LineReader reader;
         private readonly StreamWriter writer;
-        private readonly object writeLock = new();
+        // Her istemcinin kendi gönderim kuyruğu ve yazıcısı var: mesaj okumayan (ağı tıkanan) bir istemci
+        // yayın yapan thread'i ve dolayısıyla bütün sunucuyu kilitleyemiyor
+        private readonly System.Threading.Channels.Channel<string> outbox =
+            System.Threading.Channels.Channel.CreateBounded<string>(new System.Threading.Channels.BoundedChannelOptions(MaxQueuedPackets)
+            {
+                SingleReader = true,
+                FullMode = System.Threading.Channels.BoundedChannelFullMode.Wait
+            });
+        private readonly Task writerTask;
         private int messageCount;
+        private int closed;
 
         public ClientConnection(TcpClient tcp)
         {
             this.tcp = tcp;
             NetworkStream stream = tcp.GetStream();
-            reader = new StreamReader(stream);
+            reader = new LineReader(stream, MaxLineLength);
             writer = new StreamWriter(stream) { AutoFlush = true };
             Address = tcp.Client.RemoteEndPoint?.ToString() ?? "?";
+            writerTask = Task.Run(WriteLoopAsync);
+        }
+
+        private async Task WriteLoopAsync()
+        {
+            try
+            {
+                await foreach (string line in outbox.Reader.ReadAllAsync())
+                    await writer.WriteLineAsync(line);
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException or SocketException)
+            {
+                // bağlantı koptu; okuma tarafı temizliyor
+            }
         }
 
         public Guid Id { get; } = Guid.NewGuid();
@@ -350,23 +399,33 @@ public sealed class ChatServer : IDisposable
 
         public ClientInfo ToInfo() => new(Id, UserName ?? "?", Address, ConnectedAt, messageCount);
 
-        public async Task<string?> ReadLineAsync(CancellationToken token) => await reader.ReadLineAsync(token);
+        public Task<string?> ReadLineAsync(CancellationToken token) => reader.ReadLineAsync(token);
 
-        /// <summary>Gönderim hatası tüm sunucuyu durdurmasın diye hata yutuluyor; bağlantı zaten okuma tarafında kapanacak.</summary>
+        /// <summary>
+        /// Paketi kuyruğa koyar, beklemez. Kuyruk doluysa istemci mesajları okumuyor demektir:
+        /// sunucuyu yavaşlatmasın diye bağlantısı kesiliyor.
+        /// </summary>
         public void TrySend(Packet packet)
         {
-            try
-            {
-                lock (writeLock)
-                    writer.WriteLine(packet.ToJson());
-            }
-            catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
-            {
-            }
+            if (Volatile.Read(ref closed) == 1)
+                return;
+            if (!outbox.Writer.TryWrite(packet.ToJson()))
+                CloseNow();
         }
 
+        /// <summary>Kuyrukta bekleyen paketleri (ör. "neden atıldınız" mesajı) kısa süre gönderip kapatır.</summary>
         public void Close()
         {
+            outbox.Writer.TryComplete();
+            try { writerTask.Wait(500); } catch (AggregateException) { }
+            CloseNow();
+        }
+
+        private void CloseNow()
+        {
+            if (Interlocked.Exchange(ref closed, 1) == 1)
+                return;
+            outbox.Writer.TryComplete();
             try { tcp.Close(); } catch (Exception) { /* zaten kapalı */ }
         }
     }
