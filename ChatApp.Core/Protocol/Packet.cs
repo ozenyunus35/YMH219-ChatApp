@@ -51,7 +51,12 @@ public sealed class Packet
         try
         {
             packet = JsonSerializer.Deserialize<Packet>(line, Options);
-            return packet != null && Enum.IsDefined(packet.Type);
+            if (packet is null || !Enum.IsDefined(packet.Type))
+            {
+                packet = null;
+                return false;
+            }
+            return true;
         }
         catch (JsonException)
         {
