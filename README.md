@@ -59,6 +59,17 @@ Bir **sunucu** ve istediğiniz kadar **istemci** aynı bilgisayarda ya da aynı 
 
 Bağlı kullanıcı varken sunucuyu durdurmak veya pencereyi kapatmak önce onay ister.
 
+## Kullanılan teknolojiler
+
+| | |
+|---|---|
+| Dil / platform | C# 13, **.NET 10**, **Windows Forms** (Visual Studio 2022/2026 çözümü) |
+| Ağ | `System.Net.Sockets`: `TcpListener` (sunucu), `TcpClient` (istemci), `async/await` |
+| Protokol | Satır başına bir JSON paketi, `System.Text.Json` |
+| Eşzamanlılık | Her istemciye ayrı gönderim kuyruğu: `System.Threading.Channels` |
+| Test | xUnit 2.9 (localhost üzerinde gerçek TCP bağlantılarıyla) |
+| NuGet | Uygulamalar ek paket kullanmıyor; sadece test projesi: `xunit`, `xunit.runner.visualstudio`, `Microsoft.NET.Test.Sdk` |
+
 ## Ekran görüntüleri
 
 | İstemci (ali) | Sunucu |
